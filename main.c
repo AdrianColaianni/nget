@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -87,6 +88,8 @@ int main(int argc, char* argv[]) {
 			if (events[n].data.fd == sockfd) {
 				// Handle data in from network
 				b = recv(sockfd, buf, BUF_SIZE, 0);
+				if (b == 0) // Connection has closed
+					goto exit;
 				buf[b] = 0;
 				fprintf(stdout, "%s", buf);
 				memset(buf, 0, BUF_SIZE);
@@ -96,9 +99,8 @@ int main(int argc, char* argv[]) {
 				b = fread(buf, 1, BUF_SIZE, stdin);
 				buf[b] = 0;
 				send_string(sockfd, buf);
-				if (feof(stdin)) {
+				if (feof(stdin)) // Stdin empty
 					goto exit;
-				}
 				memset(buf, 0, BUF_SIZE);
 				b = 0;
 			}
