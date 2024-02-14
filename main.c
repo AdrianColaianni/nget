@@ -1,10 +1,12 @@
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -25,7 +27,30 @@ int main(int argc, char* argv[]) {
 	int sockfd;
 	if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
 		fprintf(stderr, "Faild to get socket\n");
-		return -1;
+		exit(EXIT_FAILURE);
+	}
+
+	// Set stdin to non-blocking
+	fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
+
+	// Register fd's with epoll
+	struct epoll_event sockfdev, stdinev, events[2];
+	int epollfd = epoll_create(2);
+	if (epollfd == -1) {
+		perror("epoll_create");
+	}
+
+	sockfdev.events = EPOLLIN;
+	sockfdev.data.fd = sockfd;
+	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, sockfd, &sockfdev) == -1) {
+		perror("epoll_ctl: sockfd");
+		exit(EXIT_FAILURE);
+	}
+	stdinev.events = EPOLLIN;
+	stdinev.data.fd = 0;
+	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, 0, &stdinev) == -1) {
+		perror("epoll_ctl: stdin");
+		exit(EXIT_FAILURE);
 	}
 
 	struct sockaddr_in target_addr;
@@ -45,29 +70,34 @@ int main(int argc, char* argv[]) {
 	if (cli_args.verbose)
 		fprintf(stdout, "Connected\n");
 
-	char buf[100] = {}, input[100] = {};
-	int bufi = 0, inputi = 0;
+	char buf[100] = {};
+	int c, nfds;
 	while (1) {
-		// Check if there's input to process
-		if (fread(buf + bufi, 1, 1, stdin) == 0) {
-			if (buf[bufi] == '\n') {
+		// Check if there's buf to process
+		nfds = epoll_wait(epollfd, events, 2, -1);
+		if (nfds == -1) {
+			perror("epoll_wait");
+			exit(EXIT_FAILURE);
+		}
+		for (int n = 0; n < nfds; n++) {
+			if (events[n].data.fd == sockfd) {
+				// Handle data in from network
+				c = recv(sockfd, buf, 100, 0);
+				buf[c] = 0;
+				fprintf(stdout, "%s", buf);
+				memset(buf, 0, 100);
+				c = 0;
+			} else {
+				// Handle data in from stdin
+				c = fread(buf, 1, 100, stdin);
+				buf[c] = 0;
 				send_string(sockfd, buf);
 				memset(buf, 0, 100);
-				bufi = 0;
-			} else
-				bufi++;
+				c = 0;
+			}
 		}
 		// Check if there's data from the stream
-		while (recv(sockfd, input + inputi, 1, 0)) {
-			if (input[inputi] == '\n') {
-				fprintf(stdout, "%s", input);
-				memset(input, 0, 100);
-				inputi = 0;
-			} else
-				inputi++;
-		}
 
-		sleep(80);
 		/* char* buf; */
 		/* scanf("%m[^\n]", &buf); */
 		/* getchar(); // Clears newline */
@@ -75,6 +105,7 @@ int main(int argc, char* argv[]) {
 		/* send_string(sockfd, buf); */
 	}
 
+	close(sockfd);
 	return 0;
 }
 
