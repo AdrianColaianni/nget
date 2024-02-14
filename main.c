@@ -1,14 +1,14 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
-#include <netinet/in.h>
 #include <stdbool.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#define BUF_SIZE 1024*1024 // 1 Kb
 
 struct cli_args {
 	in_addr_t ip;
@@ -24,35 +24,38 @@ int recv_string(int, char*, int);
 int main(int argc, char* argv[]) {
 	parse_args(argc, argv);
 
+	// Create socket
 	int sockfd;
 	if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
-		fprintf(stderr, "Faild to get socket\n");
+		perror("socket");
 		exit(EXIT_FAILURE);
 	}
 
 	// Set stdin to non-blocking
 	fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
 
-	// Register fd's with epoll
-	struct epoll_event sockfdev, stdinev, events[2];
+	// Create epoll instance to watch network & stdin
+	struct epoll_event ev, events[2];
 	int epollfd = epoll_create(2);
 	if (epollfd == -1) {
 		perror("epoll_create");
 	}
-
-	sockfdev.events = EPOLLIN;
-	sockfdev.data.fd = sockfd;
-	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, sockfd, &sockfdev) == -1) {
+	// Register socket
+	ev.events = EPOLLIN;
+	ev.data.fd = sockfd;
+	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, sockfd, &ev) == -1) {
 		perror("epoll_ctl: sockfd");
 		exit(EXIT_FAILURE);
 	}
-	stdinev.events = EPOLLIN;
-	stdinev.data.fd = 0;
-	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, 0, &stdinev) == -1) {
+	// Register stdin
+	ev.events = EPOLLIN;
+	ev.data.fd = 0;
+	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, 0, &ev) == -1) {
 		perror("epoll_ctl: stdin");
 		exit(EXIT_FAILURE);
 	}
 
+	// Create sockaddr_in from IP and port
 	struct sockaddr_in target_addr;
 	target_addr.sin_family = AF_INET;
 	target_addr.sin_port = htons(cli_args.port);
@@ -64,48 +67,46 @@ int main(int argc, char* argv[]) {
 
 	if (connect(sockfd, (struct sockaddr*)&target_addr,
 				sizeof(struct sockaddr)) == -1) {
-		fprintf(stderr, "Error connecting\n");
-		return -1;
+		perror("connect: sockfd");
+		exit(EXIT_FAILURE);
 	}
+
 	if (cli_args.verbose)
 		fprintf(stdout, "Connected\n");
 
-	char buf[100] = {};
-	int c, nfds;
+	char buf[BUF_SIZE] = {};
+	int b, nfds;
 	while (1) {
-		// Check if there's buf to process
 		nfds = epoll_wait(epollfd, events, 2, -1);
 		if (nfds == -1) {
 			perror("epoll_wait");
 			exit(EXIT_FAILURE);
 		}
+
 		for (int n = 0; n < nfds; n++) {
 			if (events[n].data.fd == sockfd) {
 				// Handle data in from network
-				c = recv(sockfd, buf, 100, 0);
-				buf[c] = 0;
+				b = recv(sockfd, buf, BUF_SIZE, 0);
+				buf[b] = 0;
 				fprintf(stdout, "%s", buf);
-				memset(buf, 0, 100);
-				c = 0;
+				memset(buf, 0, BUF_SIZE);
+				b = 0;
 			} else {
 				// Handle data in from stdin
-				c = fread(buf, 1, 100, stdin);
-				buf[c] = 0;
+				b = fread(buf, 1, BUF_SIZE, stdin);
+				buf[b] = 0;
 				send_string(sockfd, buf);
-				memset(buf, 0, 100);
-				c = 0;
+				if (feof(stdin)) {
+					goto exit;
+				}
+				memset(buf, 0, BUF_SIZE);
+				b = 0;
 			}
 		}
-		// Check if there's data from the stream
-
-		/* char* buf; */
-		/* scanf("%m[^\n]", &buf); */
-		/* getchar(); // Clears newline */
-		/* strcat(buf, "\n"); */
-		/* send_string(sockfd, buf); */
 	}
 
-	close(sockfd);
+exit:
+	close(epollfd);
 	return 0;
 }
 
