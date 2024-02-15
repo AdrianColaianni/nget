@@ -15,7 +15,7 @@ struct cli_args {
 	in_addr_t ip;
 	in_port_t port;
 	bool verbose;
-	bool udp;
+	int conn_type;
 } cli_args;
 
 void parse_args(int, char*[]);
@@ -27,7 +27,7 @@ int main(int argc, char* argv[]) {
 
 	// Create socket
 	int sockfd;
-	if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
+	if ((sockfd = socket(AF_INET, cli_args.conn_type, 0)) == -1) {
 		perror("socket");
 		exit(EXIT_FAILURE);
 	}
@@ -117,6 +117,8 @@ void parse_args(int argc, char* argv[]) {
 		fprintf(stderr, "Usage: %s <IP> <PORT>\n", argv[0]);
 		exit(0);
 	}
+	// Defaults
+	cli_args.conn_type = SOCK_STREAM;
 
 	// Process flags
 	for (int i = 1; i < argc - 2; i++) {
@@ -127,7 +129,7 @@ void parse_args(int argc, char* argv[]) {
 			cli_args.verbose = true;
 			break;
 		case 'u':
-			cli_args.udp = true;
+			cli_args.conn_type = SOCK_DGRAM;
 			break;
 		}
 	}
