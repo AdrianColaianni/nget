@@ -9,18 +9,19 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#define BUF_SIZE 1024*1024 // 1 Kb
+#define BUF_SIZE 1024 * 1024 // 1 Kb
 
 struct cli_args {
 	in_addr_t ip;
 	in_port_t port;
-	bool verbose;
 	int conn_type;
+	bool verbose;
+	bool listen;
 } cli_args;
 
 void parse_args(int, char*[]);
-int send_string(int, char*);
-int recv_string(int, char*, int);
+void listen_up(int sockfd, int epollfd, struct epoll_event* events);
+void talk(int sockfd, int epollfd, struct epoll_event* events);
 
 int main(int argc, char* argv[]) {
 	parse_args(argc, argv);
@@ -56,6 +57,16 @@ int main(int argc, char* argv[]) {
 		exit(EXIT_FAILURE);
 	}
 
+	if (cli_args.listen)
+		listen_up(sockfd, epollfd, events);
+	else
+		talk(sockfd, epollfd, events);
+}
+
+int send_string(int, char*);
+int recv_string(int, char*, int);
+
+void talk(int sockfd, int epollfd, struct epoll_event* events) {
 	// Create sockaddr_in from IP and port
 	struct sockaddr_in target_addr;
 	target_addr.sin_family = AF_INET;
@@ -109,7 +120,90 @@ int main(int argc, char* argv[]) {
 
 exit:
 	close(epollfd);
-	return 0;
+	exit(EXIT_SUCCESS);
+}
+
+void listen_up(int sockfd, int epollfd, struct epoll_event* events) {
+	// Create sockaddr_in from IP and port
+	struct sockaddr_in lisen_addr;
+	lisen_addr.sin_family = AF_INET;
+	lisen_addr.sin_port = htons(cli_args.port);
+	lisen_addr.sin_addr.s_addr = htonl(0);
+	memset(&(lisen_addr.sin_zero), 0, 8);
+
+	if (bind(sockfd, (struct sockaddr*)&lisen_addr, sizeof(struct sockaddr)) ==
+		-1) {
+		perror("bind");
+		exit(EXIT_FAILURE);
+	}
+
+	if (listen(sockfd, 1) == -1) {
+		perror("listen");
+		exit(EXIT_FAILURE);
+	}
+
+	if (cli_args.verbose)
+		fprintf(stdout, "Listening...\n");
+
+	char buf[BUF_SIZE] = {};
+	int b, nfds, connfd = 0;
+	struct sockaddr_in remote_addr;
+	socklen_t remote_addr_len;
+	struct epoll_event ev;
+
+	while (1) {
+		nfds = epoll_wait(epollfd, events, 2, -1);
+		if (nfds == -1) {
+			perror("epoll_wait");
+			exit(EXIT_FAILURE);
+		}
+
+		for (int n = 0; n < nfds; n++) {
+			if (events[n].data.fd == sockfd) {
+				// New connection
+				if (connfd != 0)
+					return;
+				if ((connfd = accept(sockfd, (struct sockaddr*)&remote_addr,
+									 &remote_addr_len)) == -1) {
+					perror("accept");
+					exit(EXIT_FAILURE);
+				}
+				if (cli_args.verbose)
+					fprintf(stdout, "Connected\n");
+				// Enroll new connection
+				ev.events = EPOLLIN | EPOLLET;
+				ev.data.fd = connfd;
+				if (epoll_ctl(epollfd, EPOLL_CTL_ADD, connfd, &ev) == -1) {
+					perror("epoll_ctl: connfd");
+					exit(EXIT_FAILURE);
+				}
+			} else if (connfd != 0 && events[n].data.fd == connfd) {
+				// Connection present
+				b = recv(connfd, buf, BUF_SIZE, 0);
+				if (b == 0) // Connection has closed
+					goto exit;
+				buf[b] = 0;
+				fprintf(stdout, "%s", buf);
+				memset(buf, 0, BUF_SIZE);
+				b = 0;
+			} else {
+				if (connfd == 0)
+					continue; // Not ready to send data yet
+				// Handle data in from stdin
+				b = fread(buf, 1, BUF_SIZE, stdin);
+				buf[b] = 0;
+				send_string(connfd, buf);
+				if (feof(stdin)) // Stdin empty
+					goto exit;
+				memset(buf, 0, BUF_SIZE);
+				b = 0;
+			}
+		}
+	}
+
+exit:
+	close(epollfd);
+	exit(EXIT_SUCCESS);
 }
 
 void parse_args(int argc, char* argv[]) {
@@ -119,9 +213,10 @@ void parse_args(int argc, char* argv[]) {
 	}
 	// Defaults
 	cli_args.conn_type = SOCK_STREAM;
+	cli_args.listen = false;
 
 	// Process flags
-	for (int i = 1; i < argc - 2; i++) {
+	for (int i = 1; i < argc; i++) {
 		if (*argv[i] != '-')
 			continue;
 		switch (argv[i][1]) {
@@ -131,6 +226,12 @@ void parse_args(int argc, char* argv[]) {
 		case 'u':
 			cli_args.conn_type = SOCK_DGRAM;
 			break;
+		case 'l':
+			cli_args.listen = true;
+			break;
+		default:
+			fprintf(stderr, "invalid flag %c\n", argv[i][1]);
+			exit(EXIT_FAILURE);
 		}
 	}
 
@@ -145,6 +246,10 @@ void parse_args(int argc, char* argv[]) {
 		fprintf(stderr, "Invalid port %s\n", argv[argc - 1]);
 		exit(-1);
 	}
+
+	// No need for IP
+	if (cli_args.listen)
+		return;
 
 	// Convert IP
 	if ((cli_args.ip = inet_network(argv[argc - 2])) == -1) {
