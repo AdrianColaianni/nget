@@ -20,7 +20,8 @@ struct cli_args {
 } cli_args;
 
 void parse_args(int, char*[]);
-void listen_up(int sockfd, int epollfd, struct epoll_event* events);
+void listen_tcp(int sockfd, int epollfd, struct epoll_event* events);
+void listen_udp(int sockfd, int epollfd, struct epoll_event* events);
 void talk(int sockfd, int epollfd, struct epoll_event* events);
 
 int main(int argc, char* argv[]) {
@@ -58,13 +59,15 @@ int main(int argc, char* argv[]) {
 	}
 
 	if (cli_args.listen)
-		listen_up(sockfd, epollfd, events);
+		if (cli_args.conn_type == SOCK_STREAM)
+			listen_tcp(sockfd, epollfd, events);
+		else
+			listen_udp(sockfd, epollfd, events);
 	else
 		talk(sockfd, epollfd, events);
 }
 
 int send_string(int, char*);
-int recv_string(int, char*, int);
 
 void talk(int sockfd, int epollfd, struct epoll_event* events) {
 	// Create sockaddr_in from IP and port
@@ -123,7 +126,7 @@ exit:
 	exit(EXIT_SUCCESS);
 }
 
-void listen_up(int sockfd, int epollfd, struct epoll_event* events) {
+void listen_tcp(int sockfd, int epollfd, struct epoll_event* events) {
 	// Create sockaddr_in from IP and port
 	struct sockaddr_in lisen_addr;
 	lisen_addr.sin_family = AF_INET;
@@ -206,6 +209,68 @@ exit:
 	exit(EXIT_SUCCESS);
 }
 
+void listen_udp(int sockfd, int epollfd, struct epoll_event* events) {
+	// Create sockaddr_in from IP and port
+	struct sockaddr_in lisen_addr;
+	lisen_addr.sin_family = AF_INET;
+	lisen_addr.sin_port = htons(cli_args.port);
+	lisen_addr.sin_addr.s_addr = htonl(0);
+	memset(&(lisen_addr.sin_zero), 0, 8);
+
+	if (bind(sockfd, (struct sockaddr*)&lisen_addr, sizeof(struct sockaddr)) ==
+		-1) {
+		perror("bind");
+		exit(EXIT_FAILURE);
+	}
+
+	if (cli_args.verbose)
+		fprintf(stdout, "Listening...\n");
+
+	char buf[BUF_SIZE] = {};
+	int b, nfds;
+	struct sockaddr_in remote_addr;
+	socklen_t remote_addr_len = 0;
+
+	while (1) {
+		nfds = epoll_wait(epollfd, events, 2, -1);
+		if (nfds == -1) {
+			perror("epoll_wait");
+			exit(EXIT_FAILURE);
+		}
+
+		for (int n = 0; n < nfds; n++) {
+			if (events[n].data.fd == sockfd) {
+				b = recvfrom(sockfd, buf, BUF_SIZE, 0, (struct sockaddr*)&remote_addr, &remote_addr_len);
+				if (b == 0) // Connection has closed
+					goto exit;
+				buf[b] = 0;
+				fprintf(stdout, "%s", buf);
+				memset(buf, 0, BUF_SIZE);
+				b = 0;
+			} else {
+				if (remote_addr.sin_addr.s_addr == 0)
+					continue;
+				// Handle data in from stdin
+				b = fread(buf, 1, BUF_SIZE, stdin);
+				buf[b] = 0;
+				if (connect(sockfd, (struct sockaddr*)&remote_addr,
+							remote_addr_len) == -1) {
+					perror("connect: sockfd");
+					exit(EXIT_FAILURE);
+				}
+				send_string(sockfd, buf);
+				if (feof(stdin)) // Stdin empty
+					goto exit;
+				memset(buf, 0, BUF_SIZE);
+				b = 0;
+			}
+		}
+	}
+
+exit:
+	close(epollfd);
+	exit(EXIT_SUCCESS);
+}
 void parse_args(int argc, char* argv[]) {
 	if (argc < 3) {
 		fprintf(stderr, "Usage: %s <IP> <PORT>\n", argv[0]);
@@ -269,28 +334,4 @@ int send_string(int sockfd, char* buf) {
 		buf += send_bytes;
 	}
 	return 1;
-}
-
-int recv_string(int sockfd, char* buf, int buf_size) {
-#define EOL "\r\n"
-#define EOL_SIZE 2
-	char* ptr;
-	int eol_matched = 0, bytes_read = 0;
-
-	ptr = buf;
-	while (recv(sockfd, ptr, 1, 0) == 1 && bytes_read + 1 < buf_size) {
-		bytes_read++;
-		if (*ptr == EOL[eol_matched]) {
-			eol_matched++;
-			if (eol_matched == EOL_SIZE) {
-				*(ptr + 1 - EOL_SIZE) = '\0';
-				return strlen(buf);
-			}
-		} else {
-			eol_matched = 0;
-		}
-		ptr++;
-	}
-	buf[bytes_read] = '\0';
-	return bytes_read;
 }
